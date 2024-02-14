@@ -1,0 +1,253 @@
+---
+title: "SST Anomalies and Sigmas"
+author: "InfinityCent"
+date: "2024-01-10"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Checking how likely an event is due to random chance
+
+Every time a new SST sigma is reported, one way of communicating it to those without a background in statistics is to report the likelihood of this event happening by complete chance. The code block below takes takes the number of sigmas away from mean (σ), then returns the proportion of data contained within -σ and +σ in a normal distribution. It also reports the chances of an event outside of +σ happening by chance. 
+
+```{r}
+sd_prob = function(sigmas) {
+  data = c(1:100) 
+  mean = mean(data) 
+  sd = sd(data) 
+  
+  z_lower = (mean - sd - mean) / sd 
+  z_upper = (mean + sd - mean) / sd 
+  
+  p_sd = pnorm(z_upper * sigmas) - pnorm(z_lower * sigmas) 
+  
+  cat(sprintf('Proportion of data within %s standard deviations: %.20f\nFor +%s sd, this is a 1 in %.0f chance',
+          sigmas, p_sd, sigmas, 1/((1-p_sd)/2)))
+}
+
+sd_prob(6.1)
+```
+
+
+## Replicating the Sea Surface Temperature plot from ClimateReanalyzer
+
+SST measurements began Sept. 1, 1981 and ClimateReanalyzer was established in 2012. Thus, a baseline using data from 1982-2012 is commonly used. The plot below shows the average SST  measurement for each day of the year since 1981.
+
+```{r}
+# step 1: load data from website
+sst_json_url = "https://climatereanalyzer.org/clim/sst_daily/json/oisst2.1_world2_sst_day.json"
+sst_data = jsonlite::fromJSON(sst_json_url, flatten = TRUE)
+
+# step 2: convert data from json format to a dataframe
+sst_df = data.frame(day = 1:366)
+for (i in 1:nrow(sst_data)) {
+  data_list = sst_data[i, 2][[1]]
+  data_col = reshape2::colsplit(data_list, ",", names = sprintf("y%s", sst_data[i, 1]))
+  sst_df = cbind(sst_df, data_col)
+}
+colnames(sst_df)[47] = "yplus 2sd"
+colnames(sst_df)[48] = "yminus 2sd"
+
+# step 3: change the format of the dataframe in a way that's compatible with plotting
+library("tidyverse")
+sst_df_long = sst_df %>%
+  select(day, starts_with("y")) %>%
+  gather(key = "year", value = "temp", -day)
+
+# step 3.1: create sub-dataframes to make graphing easier
+current_year = filter(sst_df_long, year == "y2024")
+last_year = filter(sst_df_long, year == "y2023")
+baseline = filter(sst_df_long, year %in% c("y1982-2011 mean"))
+minusplus_sd = filter(sst_df_long, year %in% c("yminus 2sd", "yplus 2sd"))
+
+# step 4: plot the data
+library(ggplot2)
+
+# base plot
+ggplot() + 
+  geom_line(data = sst_df_long, aes(x = day, y = temp, color = year)) + 
+  scale_color_grey() +
+  scale_x_continuous(breaks = c(1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335),
+                     labels = c("Jan1", "Feb1", "Mar1", "Apr1", "May1", "Jun1", 
+                                "Jul1", "Aug1", "Sept1", "Oct1", "Nov1", "Dec1"),
+                     limits = c(0, 366),
+                     expand = c(0, 0)) +
+  ylim(19.5, 21.2) +
+  theme(legend.position = "none") +
+  guides(color = guide_legend(ncol = 9)) +
+  labs(color = "Year", 
+       title = "Daily Sea Surface Temperature (1981-2024)", 
+       x = "Day", 
+       y = "Temperature (°C)") +
+  # overlay current year
+  geom_line(data = current_year, aes(x = day, y = temp, group = year), colour = "red") +
+  # overlay past year
+  geom_line(data = last_year, aes(x = day, y = temp, group = year), colour = "orange") +
+  # overlay 1982-2011 baseline
+  geom_line(data = baseline, aes(x = day, y = temp, group = year), 
+            colour = "black", linetype = "dashed", linewidth = 1) +
+  # overlay +/- 2sd
+  geom_line(data = minusplus_sd, aes(x = day, y = temp, group = year), 
+            colour = "black", linetype = "longdash", linewidth = 1)
+
+
+```
+
+## Displaying SST data in terms of standard deviations away from the 1982-2011 mean
+
+The code below is the same as what's shown above. Only the dataframe used for plotting is different.
+
+```{r}
+# step 1: load data from website
+sst_json_url = "https://climatereanalyzer.org/clim/sst_daily/json/oisst2.1_world2_sst_day.json"
+sst_data = jsonlite::fromJSON(sst_json_url, flatten = TRUE)
+
+# step 2: convert data from json format to a dataframe
+sst_df = data.frame(day = 1:366)
+for (i in 1:nrow(sst_data)) {
+  data_list = sst_data[i, 2][[1]]
+  data_col = reshape2::colsplit(data_list, ",", names = sprintf("y%s", sst_data[i, 1]))
+  sst_df = cbind(sst_df, data_col)
+}
+colnames(sst_df)[47] = "yplus 2sd"
+colnames(sst_df)[48] = "yminus 2sd"
+
+# step 3: using the 1982-2011 baseline, create a function to calculate the sigmas (z-scores) for each value in the original dataframe
+calculate_sigmas = function(day, point_measurement, baseline) {
+  
+  mean = mean(unlist(baseline[day, ]), na.rm = TRUE)
+  sd = sd(unlist(baseline[day, ]), na.rm = TRUE)
+  z = (point_measurement - mean) / sd
+  
+  return (round(z, 2))
+}
+
+daily_sigma_df = data.frame(matrix(nrow = 0, ncol = ncol(sst_df) - 4))
+for (i in 1:366) {
+  point_measurements = sst_df[i, 2:45]
+  z_vec = calculate_sigmas(i, point_measurements, sst_df[, 3:32])
+  daily_sigma_df = rbind(daily_sigma_df, z_vec)
+}
+colnames(daily_sigma_df) = colnames(sst_df[, 2:45])
+daily_sigma_df = cbind(day = 1:366, daily_sigma_df)
+
+# step 4: change the format of the dataframe in a way that's compatible with plotting
+library("tidyverse")
+daily_sigma_df_long = daily_sigma_df %>%
+  select(day, starts_with("y")) %>%
+  gather(key = "year", value = "temp", -day)
+
+# step 4.1: create sub-dataframes to make plotting easier
+current_year = filter(daily_sigma_df_long, year == "y2024")
+last_year = filter(daily_sigma_df_long, year == "y2023")
+
+# step 5: plot the data
+library(ggplot2)
+
+# base plot
+ggplot() + 
+  geom_line(data = daily_sigma_df_long, aes(x = day, y = temp, color = year)) + 
+  scale_color_grey() +
+  scale_x_continuous(breaks = c(1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335),
+                     labels = c("Jan1", "Feb1", "Mar1", "Apr1", "May1", "Jun1", 
+                                "Jul1", "Aug1", "Sept1", "Oct1", "Nov1", "Dec1"),
+                     limits = c(0, 366),
+                     expand = c(0, 0)) +
+  scale_y_continuous(breaks = c(-2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5,
+                                4, 4.5, 5, 5.5, 6, 6.5, 7),
+                     limits = c(-2.5, 7),
+                     expand = c(0, 0)) +
+  theme(legend.position = "none") +
+  guides(color = guide_legend(ncol = 9)) +
+  labs(color = "Year", 
+       title = "Daily Sea Surface Temperature Sigmas Relative to 1982-2011 Baseline", 
+       x = "Day", 
+       y = "Sigmas Away from Mean") +
+  # overlay current year
+  geom_line(data = current_year, aes(x = day, y = temp, group = year), colour = "red") +
+  # overlay past year
+  geom_line(data = last_year, aes(x = day, y = temp, group = year), colour = "orange")
+
+```
+
+## Displaying SST data in terms of difference from the 1982-2011 mean
+
+The code below is the same as what's shown above. Only the dataframe used for plotting is different.
+
+```{r}
+# step 1: load data from website
+sst_json_url = "https://climatereanalyzer.org/clim/sst_daily/json/oisst2.1_world2_sst_day.json"
+sst_data = jsonlite::fromJSON(sst_json_url, flatten = TRUE)
+
+# step 2: convert data from json format to a dataframe
+sst_df = data.frame(day = 1:366)
+for (i in 1:nrow(sst_data)) {
+  data_list = sst_data[i, 2][[1]]
+  data_col = reshape2::colsplit(data_list, ",", names = sprintf("y%s", sst_data[i, 1]))
+  sst_df = cbind(sst_df, data_col)
+}
+colnames(sst_df)[47] = "yplus 2sd"
+colnames(sst_df)[48] = "yminus 2sd"
+
+# step 3: using the 1982-2011 baseline, create a function to calculate the anomaly for each value in the original dataframe
+calculate_anomalies = function(day, point_measurement, baseline) {
+  
+  mean = mean(unlist(baseline[day, ]), na.rm = TRUE)
+  anomaly = (point_measurement - mean)
+  
+  return (round(anomaly, 2))
+}
+
+daily_anomaly_df = data.frame(matrix(nrow = 0, ncol = ncol(sst_df) - 4))
+for (i in 1:366) {
+  point_measurements = sst_df[i, 2:45]
+  anomaly_vec = calculate_anomalies(i, point_measurements, sst_df[, 3:32])
+  daily_anomaly_df = rbind(daily_anomaly_df, anomaly_vec)
+}
+colnames(daily_anomaly_df) = colnames(sst_df[, 2:45])
+daily_anomaly_df = cbind(day = 1:366, daily_anomaly_df)
+
+# step 4: change the format of the dataframe in a way that's compatible with plotting
+library("tidyverse")
+daily_anomaly_df_long = daily_anomaly_df %>%
+  select(day, starts_with("y")) %>%
+  gather(key = "year", value = "temp", -day)
+
+# step 4.1: create sub-dataframes to make plotting easier
+current_year = filter(daily_anomaly_df_long, year == "y2024")
+last_year = filter(daily_anomaly_df_long, year == "y2023")
+
+# step 5: plot the data
+library(ggplot2)
+
+# base plot
+ggplot() + 
+  geom_line(data = daily_anomaly_df_long, aes(x = day, y = temp, color = year)) + 
+  scale_color_grey() +
+  scale_x_continuous(breaks = c(1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335),
+                     labels = c("Jan1", "Feb1", "Mar1", "Apr1", "May1", "Jun1", 
+                                "Jul1", "Aug1", "Sept1", "Oct1", "Nov1", "Dec1"),
+                     limits = c(0, 366),
+                     expand = c(0, 0)) +
+  scale_y_continuous(breaks = c(-1, -0.8, -0.6, -0.4, -0.2, 0, 0.2, 0.4, 0.6, 0.8, 1),
+                     limits = c(-1, 1),
+                     expand = c(0, 0)) +
+  theme(legend.position = "none") +
+  guides(color = guide_legend(ncol = 9)) +
+  labs(color = "Year", 
+       title = "Daily Sea Surface Temperature Anomalies Relative to 1982-2011 Baseline", 
+       x = "Day", 
+       y = "Anomaly") +
+  # overlay current year
+  geom_line(data = current_year, aes(x = day, y = temp, group = year), colour = "red") +
+  # overlay past year
+  geom_line(data = last_year, aes(x = day, y = temp, group = year), colour = "orange") +
+  # add a horizontal line at 0
+  geom_hline(yintercept = 0)
+
+```
